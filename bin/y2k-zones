@@ -11,11 +11,13 @@ Pipeline:
        glass zone, global dust, global color filter). Each zone is painted
        with a freehand brush. By default the mask is static (reused as-is
        for every frame); each paintable zone also has an optional "Track
-       motion" toggle that nudges the mask frame-to-frame using dense
-       optical flow (cv2.calcOpticalFlowFarneback), so the zone loosely
-       follows movement in the shot instead of staying pinned in place.
-       This is a lightweight flow-based follow, not real object tracking -
-       it can drift on fast motion or big scene changes.
+       motion" toggle. When enabled, a CSRT object tracker (cv2.TrackerCSRT)
+       is initialized on the bounding box of the painted mask and follows
+       that region frame-to-frame (any direction, any object - person,
+       animal, prop); the mask is translated/rescaled to match the tracked
+       box each frame. This is appearance-based tracking of a single region,
+       not semantic "this is a person" detection - it can lose the target on
+       heavy occlusion, very fast motion, or a hard scene cut.
     3) Press ENTER to move to the next step. After step 5, processing starts
        automatically and renders the whole video with the chosen settings.
     4) The original audio track is muxed back into the output via ffmpeg.
@@ -627,26 +629,92 @@ def render_frame(frame, settings, frame_idx, sparkle_seeds):
     return out
 
 
-def warp_mask_with_flow(mask, flow):
-    """Shift a binary mask forward by one frame of dense optical flow.
+def _mask_bbox(mask):
+    """Bounding box (x, y, w, h) of the non-zero region of a mask."""
+    ys, xs = np.where(mask > 0)
+    if len(xs) == 0:
+        return None
+    x0, x1 = int(xs.min()), int(xs.max())
+    y0, y1 = int(ys.min()), int(ys.max())
+    return (x0, y0, x1 - x0 + 1, y1 - y0 + 1)
 
-    `flow` is the per-pixel (dx, dy) displacement from the previous frame to
-    the current frame (as returned by cv2.calcOpticalFlowFarneback). This is
-    a lightweight "follow the motion" approach, not a real object tracker:
-    it works well for small/moderate movement in the shot and can drift over
-    many frames or break on fast motion / big scene cuts.
+
+def _make_csrt_tracker():
+    """Create a CSRT tracker, compatible with both old and new cv2 APIs.
+
+    Returns None if this OpenCV build has no CSRT support (i.e. plain
+    `opencv-python` without the contrib modules) instead of raising, so the
+    caller can fall back to an untracked (static) mask with a clear warning.
     """
-    h, w = mask.shape[:2]
-    flow_map = np.zeros_like(flow)
-    flow_map[..., 0] = np.arange(w) - flow[..., 0]
-    flow_map[..., 1] = np.arange(h)[:, None] - flow[..., 1]
-    warped = cv2.remap(mask, flow_map[..., 0].astype(np.float32),
-                        flow_map[..., 1].astype(np.float32),
-                        interpolation=cv2.INTER_LINEAR, borderValue=0)
-    # re-binarize and clean up small speckle noise introduced by remapping
-    _, warped = cv2.threshold(warped, 100, 255, cv2.THRESH_BINARY)
-    warped = cv2.morphologyEx(warped, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
-    return warped
+    try:
+        if hasattr(cv2, "legacy") and hasattr(cv2.legacy, "TrackerCSRT_create"):
+            return cv2.legacy.TrackerCSRT_create()
+        if hasattr(cv2, "TrackerCSRT_create"):
+            return cv2.TrackerCSRT_create()
+    except Exception:
+        pass
+    return None
+
+
+class ZoneTracker:
+    """Follows a painted mask across frames using a CSRT object tracker.
+
+    CSRT tracks a single rectangular region by appearance (it doesn't know
+    or care whether that region is a person, an animal, or anything else).
+    On each frame we ask the tracker for the region's new bounding box,
+    then translate + rescale the *original* mask shape to match how that
+    box moved/resized, rather than trying to re-derive a shape from CSRT's
+    box directly (which would just give a plain rectangle).
+    """
+
+    def __init__(self, mask, first_frame):
+        self.base_mask = mask.copy()
+        self.base_bbox = _mask_bbox(mask)
+        self.current_mask = mask.copy()
+        self.tracker = None
+        self.lost = False
+
+        if self.base_bbox is not None:
+            self.tracker = _make_csrt_tracker()
+            if self.tracker is None:
+                print("\n  Warning: this OpenCV build has no CSRT tracker "
+                      "support (install 'opencv-contrib-python' to enable "
+                      "'Track motion'). Falling back to a static mask.")
+            else:
+                self.tracker.init(first_frame, self.base_bbox)
+
+    def update(self, frame):
+        """Advance the tracker by one frame and return the current mask."""
+        if self.tracker is None:
+            return self.current_mask  # nothing was painted for this zone
+
+        ok, bbox = self.tracker.update(frame)
+        if not ok:
+            # target lost: freeze the mask at its last known position
+            # rather than snapping back or vanishing.
+            if not self.lost:
+                print("\n  Warning: motion tracker lost its target, "
+                      "freezing the zone at its last position.")
+                self.lost = True
+            return self.current_mask
+
+        bx0, by0, bw, bh = self.base_bbox
+        cx0, cy0, cw, ch = bbox
+        scale_x = cw / max(1.0, bw)
+        scale_y = ch / max(1.0, bh)
+
+        h, w = self.base_mask.shape[:2]
+        # affine transform: scale the base mask about its own bbox origin,
+        # then translate so that bbox origin lands on the tracker's box.
+        m = np.array([
+            [scale_x, 0, cx0 - bx0 * scale_x],
+            [0, scale_y, cy0 - by0 * scale_y],
+        ], dtype=np.float32)
+        warped = cv2.warpAffine(self.base_mask, m, (w, h),
+                                 flags=cv2.INTER_LINEAR, borderValue=0)
+        _, warped = cv2.threshold(warped, 100, 255, cv2.THRESH_BINARY)
+        self.current_mask = warped
+        return self.current_mask
 
 
 # --------------------------------------------------------------------------
@@ -675,45 +743,60 @@ def process_video(input_path, output_path, settings):
     rng = random.Random(42)
     sparkle_seeds = [rng.randint(0, 10_000) for _ in range(400)]
 
-    # Current, possibly-tracked masks per zone. These start as the mask the
-    # user painted and get nudged forward each frame by optical flow for any
-    # zone that has "track motion" enabled.
-    tracked_masks = {
-        "blur": settings["blur"]["mask"].copy(),
-        "glitter": settings["glitter"]["mask"].copy(),
-        "glass": settings["glass"]["mask"].copy(),
-    }
-    any_tracking = any(settings[z]["track"] for z in ("blur", "glitter", "glass"))
-    prev_gray = None
+    # Read the very first frame to (a) know what CSRT should lock onto for
+    # any tracked zone, and (b) make sure frame_idx 0 uses the exact mask
+    # the user painted (before any tracking has had a chance to move it).
+    ret0, first_frame = cap.read()
+    if not ret0:
+        print("Error: could not read any frames from the input video.")
+        sys.exit(1)
+
+    zone_trackers = {}
+    for zone_name in ("blur", "glitter", "glass"):
+        mask = settings[zone_name]["mask"]
+        if settings[zone_name]["track"] and mask.any():
+            zone_trackers[zone_name] = ZoneTracker(mask, first_frame)
+
+    def current_masks():
+        return {
+            "blur": zone_trackers["blur"].current_mask if "blur" in zone_trackers
+            else settings["blur"]["mask"],
+            "glitter": zone_trackers["glitter"].current_mask if "glitter" in zone_trackers
+            else settings["glitter"]["mask"],
+            "glass": zone_trackers["glass"].current_mask if "glass" in zone_trackers
+            else settings["glass"]["mask"],
+        }
+
+    def build_frame_settings():
+        masks = current_masks()
+        return {
+            "blur": {**settings["blur"], "mask": masks["blur"]},
+            "glitter": {**settings["glitter"], "mask": masks["glitter"]},
+            "glass": {**settings["glass"], "mask": masks["glass"]},
+            "dust": settings["dust"],
+            "filter": settings["filter"],
+        }
 
     frame_idx = 0
     print(f"Processing '{input_path}' ({total_frames} frames @ {fps:.2f} fps)...")
+
+    # process the first frame with the mask exactly as painted
+    out_frame = render_frame(first_frame, build_frame_settings(), frame_idx, sparkle_seeds)
+    writer.write(out_frame)
+    frame_idx += 1
+    if total_frames > 0:
+        print(f"\r  {frame_idx}/{total_frames} ({100.0 * frame_idx / total_frames:5.1f}%)",
+              end="", flush=True)
+
     while True:
         ret, frame = cap.read()
         if not ret:
             break
 
-        if any_tracking:
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            if prev_gray is not None:
-                flow = cv2.calcOpticalFlowFarneback(
-                    prev_gray, gray, None,
-                    pyr_scale=0.5, levels=3, winsize=21,
-                    iterations=3, poly_n=5, poly_sigma=1.2, flags=0)
-                for zone_name in ("blur", "glitter", "glass"):
-                    if settings[zone_name]["track"] and tracked_masks[zone_name].any():
-                        tracked_masks[zone_name] = warp_mask_with_flow(
-                            tracked_masks[zone_name], flow)
-            prev_gray = gray
+        for tracker in zone_trackers.values():
+            tracker.update(frame)
 
-        frame_settings = {
-            "blur": {**settings["blur"], "mask": tracked_masks["blur"]},
-            "glitter": {**settings["glitter"], "mask": tracked_masks["glitter"]},
-            "glass": {**settings["glass"], "mask": tracked_masks["glass"]},
-            "dust": settings["dust"],
-            "filter": settings["filter"],
-        }
-
+        frame_settings = build_frame_settings()
         out_frame = render_frame(frame, frame_settings, frame_idx, sparkle_seeds)
         writer.write(out_frame)
         frame_idx += 1
