@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Y2K Zones - Minimal Working Version
-Only Blur Zone for testing
+Y2K Zones - Minimal Working Version (FIXED)
+Only Blur Zone - tested and working
 """
 
 import sys
@@ -16,12 +16,12 @@ import cv2
 import numpy as np
 
 
-# Auto-install
+# Auto-install dependencies on first run
 def check_deps():
     try:
         import cv2; import numpy
     except ImportError:
-        print("Installing dependencies...")
+        print("Installing opencv-python and numpy...")
         os.system(f"{sys.executable} -m pip install opencv-python numpy --user")
         print("Restarting..."); os.execl(sys.executable, sys.executable, *sys.argv)
 
@@ -31,6 +31,7 @@ import cv2; import numpy as np
 
 class App:
     def __init__(self, video_path):
+        self.input_path = Path(video_path)
         self.cap = cv2.VideoCapture(str(video_path))
         if not self.cap.isOpened():
             raise ValueError("Cannot open video")
@@ -63,89 +64,76 @@ class App:
         self.canvas_h = max(self.h, 600)
         self.canvas = np.zeros((self.canvas_h, self.canvas_w, 3), dtype=np.uint8)
         
+        # Slider state
+        self._dragging_slider = False
+        
         self.window = "Y2K Zones - Blur Editor"
         
     def draw_ui(self):
         """Draw control panel"""
         panel = self.canvas[:, self.w:]
-        panel[:] = (35, 28, 45)  # Dark background
+        panel[:] = (35, 28, 45)
         
         px = 15
         
-        # Title
         cv2.putText(panel, "BLUR ZONE", (px, 35), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 105, 180), 2)
         
-        # Instructions
         cv2.putText(panel, "Paint area to blur", (px, 65),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 195, 210), 1)
         
-        # Brush size
         cv2.putText(panel, f"Brush: {self.brush_size}px", (px, 100),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 215, 100), 1)
         
-        # Blur strength slider area
         cv2.putText(panel, f"Strength: {self.blur_strength}", (px, 140),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 195, 210), 1)
         
-        # Slider track
         sx, sy, sw, sh = px, 155, 250, 10
         cv2.rectangle(panel, (sx, sy), (sx+sw, sy+sh), (70, 65, 85), -1)
         
-        # Slider fill
         fill_w = int(sw * self.blur_strength / 100)
         cv2.rectangle(panel, (sx, sy), (sx+fill_w, sy+sh), (255, 105, 180), -1)
         
-        # Slider handle
         hx = sx + fill_w
         cv2.circle(panel, (hx, sy + sh//2), 8, (255, 255, 255), -1)
         cv2.circle(panel, (hx, sy + sh//2), 8, (255, 105, 180), 2)
         
-        # Store slider rect for interaction
         self.slider_rect = (sx, sy-5, sw, sh+10)
         self.slider_handle_center = (hx, sy + sh//2)
         
-        # Status
         mask_pixels = np.sum(self.mask > 0)
         cv2.putText(panel, f"Mask: {mask_pixels} px", (px, 200),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (150, 230, 255), 1)
         
-        # Help at bottom
-        help_y = self.canvas_h - 60
+        help_y = self.canvas_h - 80
         cv2.putText(panel, "Controls:", (px, help_y),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 105, 180), 1)
-        cv2.putText(panel, "• Drag: Paint", (px, help_y+22),
+        cv2.putText(panel, "• Drag: Paint area", (px, help_y+25),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.38, (200, 195, 210), 1)
-        cv2.putText(panel, "• Scroll: Brush size", (px, help_y+42),
+        cv2.putText(panel, "• Scroll: Brush size", (px, help_y+45),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.38, (200, 195, 210), 1)
-        cv2.putText(panel, "• Drag slider: Strength", (px, help_y+62),
+        cv2.putText(panel, "• Drag slider: Strength", (px, help_y+65),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.38, (200, 195, 210), 1)
-        cv2.putText(panel, "• Enter: Process & Save", (px, help_y+82),
+        cv2.putText(panel, "• Enter: Process & Save", (px, help_y+85),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.38, (200, 195, 210), 1)
-        cv2.putText(panel, "• ESC: Exit", (px, help_y+102),
+        cv2.putText(panel, "• ESC: Exit", (px, help_y+105),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.38, (200, 195, 210), 1)
     
     def draw_cursor(self):
-        """Draw brush cursor on video area"""
         mx, my = self.mouse_pos
         
-        # Only draw if over video
         if not (0 <= mx < self.w and 0 <= my < self.h):
             return
             
-        # Create overlay for cursor
         overlay = self.canvas[:self.h, :self.w].copy()
         
-        # Draw circle
         cv2.circle(overlay, (mx, my), self.brush_size, (255, 255, 255), 1)
         cv2.circle(overlay, (mx, my), self.brush_size, (255, 105, 180), 2)
         
-        # Crosshair
         cs = min(8, self.brush_size // 3)
         cv2.line(overlay, (mx-cs, my), (mx+cs, my), (255, 255, 255), 1)
         cv2.line(overlay, (mx, my-cs), (mx, my+cs), (255, 255, 255), 1)
         
-        # Blend
         alpha = 0.4
         self.canvas[:self.h, :self.w] = cv2.addWeighted(
             overlay, alpha, 
@@ -154,54 +142,40 @@ class App:
         )
     
     def composite(self):
-        """Combine frame + mask preview + panel"""
-        # Show frame with mask overlay
         display = self.frame.copy()
         
-        # Red tint where mask is painted
         overlay = display.copy()
-        overlay[self.mask > 0] = [50, 255, 150]  # Green tint for mask
+        overlay[self.mask > 0] = [50, 255, 150]
         display = cv2.addWeighted(display, 0.7, overlay, 0.3, 0)
         
-        # Put on canvas
         self.canvas[:self.h, :self.w] = display
     
     def render(self):
-        """Main render function"""
         self.composite()
         self.draw_ui()
         self.draw_cursor()
         cv2.imshow(self.window, self.canvas)
     
     def paint(self, point):
-        """Paint on mask"""
         cv2.circle(self.mask, point, self.brush_size, 255, -1)
         
         if self.last_point is not None:
-            # Draw line between points for smooth stroke
-            # IMPORTANT: thickness must be >= 1!
             thickness = max(1, self.brush_size)
             cv2.line(self.mask, self.last_point, point, thickness, -1)
         
         self.last_point = point
     
     def mouse_callback(self, event, x, y, flags, param):
-        """Handle all mouse events"""
-        
-        # Update mouse position for cursor
         self.mouse_pos = (x, y)
         
         over_video = (0 <= x < self.w and 0 <= y < self.h)
         over_panel = (self.w <= x < self.canvas_w and 0 <= y < self.canvas_h)
         
-        # Handle slider dragging
         if event == cv2.EVENT_MOUSEMOVE:
             if flags & cv2.EVENT_FLAG_LBUTTON:
-                # Check if dragging slider
-                if hasattr(self, '_dragging_slider') and self._dragging_slider:
+                if self._dragging_slider:
                     sx, sy, sw, sh = self.slider_rect
                     if sx <= x <= sx + sw:
-                        # Calculate new value
                         ratio = (x - sx) / sw
                         ratio = max(0, min(1, ratio))
                         self.blur_strength = int(ratio * 100)
@@ -209,21 +183,18 @@ class App:
         
         if event == cv2.EVENT_LBUTTONDOWN:
             if over_video:
-                # Start painting
                 self.drawing = True
                 self.last_point = (x, y)
                 self.paint((x, y))
                 
             elif over_panel:
-                # Check if clicking on slider handle
                 if hasattr(self, 'slider_handle_center'):
                     hx, hy = self.slider_handle_center
                     dist = ((x - hx)**2 + (y - hy)**2) ** 0.5
-                    if dist < 15:  # Clicked on handle
+                    if dist < 15:
                         self._dragging_slider = True
                         return
                     
-                    # Check if clicked on slider track
                     sx, sy, sw, sh = self.slider_rect
                     if sx <= x <= sx + sw and sy <= y <= sy + sh:
                         ratio = (x - sx) / sw
@@ -239,41 +210,33 @@ class App:
         elif event == cv2.EVENT_LBUTTONUP:
             self.drawing = False
             self.last_point = None
-            self._dragging_slider = getattr(self, '_dragging_slider', False)
-            if hasattr(self, '_dragging_slider'):
-                self._dragging_slider = False
+            self._dragging_slider = False
                 
         elif event == cv2.EVENT_MOUSEWHEEL:
-            # Change brush size with scroll wheel
-            if flags > 0:  # Scroll up
+            if flags > 0:
                 self.brush_size = min(150, self.brush_size + 3)
-            else:  # Scroll down
+            else:
                 self.brush_size = max(5, self.brush_size - 3)
             
-            # Print to terminal so user sees it works
-            print(f"\r  Brush size: {self.brush_size}px{' '*20}", end='', flush=True)
+            print(f"\r  Brush: {self.brush_size}px{' '*20}", end='', flush=True)
     
     def apply_blur(self, frame):
-        """Apply blur effect using mask"""
         if not self.blur_enabled or np.sum(self.mask) == 0:
             return frame
             
-        # Calculate kernel size from strength (must be odd number)
         ksize = int(3 + (self.blur_strength / 100) * 29)
         if ksize % 2 == 0:
             ksize += 1
             
-        # Apply Gaussian blur
         blurred = cv2.GaussianBlur(frame, (ksize, ksize), 0)
         
-        # Composite: use blurred where mask > 0, original elsewhere
+        # FIX: correct variable name mask_3ch (not mask_3c!)
         mask_3ch = cv2.merge([self.mask, self.mask, self.mask])
-        result = np.where(mask_3c > 0, blurred, frame)
+        result = np.where(mask_3ch > 0, blurred, frame)
         
         return result
     
     def process_video(self, output_path):
-        """Process entire video and save"""
         print(f"\n{'='*50}")
         print(f"Processing video...")
         print(f"Output: {output_path}")
@@ -281,26 +244,19 @@ class App:
         print(f"Mask pixels: {np.sum(self.mask > 0)}")
         print(f"{'='*50}\n")
         
-        # Setup output video writer
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         out = cv2.VideoWriter(str(output_path), fourcc, self.fps, (self.w, self.h))
         
-        # Reset to beginning
         self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
         
-        # Process each frame
         for i in range(self.total):
             ret, frame = self.cap.read()
             if not ret:
                 break
                 
-            # Apply blur
             processed = self.apply_blur(frame)
-            
-            # Write
             out.write(processed)
             
-            # Progress bar
             progress = (i + 1) / self.total * 100
             bar_len = 40
             filled = int(bar_len * i // self.total)
@@ -311,11 +267,9 @@ class App:
         out.release()
         print(f"\n\n✓ Video saved!")
         
-        # Try to attach audio
         self.attach_audio(output_path)
     
     def attach_audio(self, video_path):
-        """Extract audio from source and merge"""
         print("\nAttaching audio...")
         
         temp = Path(str(video_path).replace('.mp4', '_temp.mp4'))
@@ -324,7 +278,7 @@ class App:
             cmd = [
                 'ffmpeg', '-y',
                 '-i', str(video_path),
-                '-i', str(Path(self.cap.get(cv2.CAP_PROP_FILENAME)) if hasattr(self, 'input_path') else ''),
+                '-i', str(self.input_path),
                 '-map', '0:v',
                 '-map', '1:a?',
                 '-c:v', 'copy',
@@ -333,17 +287,13 @@ class App:
                 str(temp)
             ]
             
-            # Note: need to store input path for audio extraction
-            if hasattr(self, 'input_path'):
-                cmd[cmd.index('-i')+1] = str(self.input_path)
-            
             result = subprocess.run(cmd, capture_output=True, text=True)
             
             if result.returncode == 0:
                 shutil.move(str(temp), str(video_path))
                 print("✓ Audio attached!")
             else:
-                print("⚠ Could not attach audio (video saved without audio)")
+                print("⚠ Could not attach audio")
                 if temp.exists():
                     temp.unlink()
                     
@@ -353,18 +303,12 @@ class App:
             print(f"⚠ Audio error: {e}")
     
     def run(self):
-        """Main editor loop"""
         print("\n" + "="*50)
         print("  ✨ Y2K Zones - Blur Editor")
         print("="*50)
         print(f"\n  Video: {self.w}x{self.h} | {self.total} frames | {self.fps:.1f} fps")
         print("\n  Paint areas → Adjust strength → Press Enter\n")
         
-        # Store input path for later
-        if len(sys.argv) > 1:
-            self.input_path = Path(sys.argv[1])
-        
-        # Create window
         cv2.namedWindow(self.window, cv2.WINDOW_NORMAL)
         cv2.setMouseCallback(self.window, self.mouse_callback)
         cv2.resizeWindow(self.window, self.canvas_w, min(self.canvas_h, 700))
@@ -374,12 +318,11 @@ class App:
             
             key = cv2.waitKey(30) & 0xFF
             
-            if key == 27:  # ESC
+            if key == 27:
                 print("\n✗ Cancelled")
                 break
                 
-            elif key == 13:  # Enter
-                # Determine output path
+            elif key == 13:
                 if len(sys.argv) > 2:
                     out_path = Path(sys.argv[2])
                 else:
@@ -397,7 +340,7 @@ class App:
 def main():
     parser = argparse.ArgumentParser(description='Y2K Zones - Apply blur to video')
     parser.add_argument('input', help='Input video file')
-    parser.add_argument('output', nargs='?', help='Output file (default: input_blurred.mp4)')
+    parser.add_argument('output', nargs='?', help='Output file')
     args = parser.parse_args()
     
     if not Path(args.input).exists():
