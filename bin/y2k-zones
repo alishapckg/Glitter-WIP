@@ -297,11 +297,6 @@ class UIColorSwatch:
                    cv2.FONT_HERSHEY_SIMPLEX, font_scale, text_color, 1)
 
 
-def polylines(img, pts, isClosed, color, thickness):
-    """Helper to draw polylines"""
-    cv2.polylines(img, [pts], isClosed, color, thickness, cv2.LINE_AA)
-
-
 # ============================================================================
 # TRACKER MANAGER (unchanged from v1.1)
 # ============================================================================
