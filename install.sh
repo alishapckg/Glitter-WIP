@@ -52,14 +52,28 @@ PYTHON_CMD="python3"
 echo ""
 echo -e "${YELLOW}[2/5] Installing Python dependencies...${NC}"
 
-# Check if opencv is installed
-if $PYTHON_CMD -c "import cv2" 2> /dev/null; then
+# Check if opencv is installed AND has CSRT tracker support (contrib
+# modules). "Track motion" needs opencv-contrib-python; plain
+# opencv-python/opencv-python-headless does not include the tracker.
+HAS_CSRT=$($PYTHON_CMD -c "
+import cv2
+ok = hasattr(cv2, 'TrackerCSRT_create') or (hasattr(cv2, 'legacy') and hasattr(cv2.legacy, 'TrackerCSRT_create'))
+print('yes' if ok else 'no')
+" 2>/dev/null || echo "no")
+
+if $PYTHON_CMD -c "import cv2" 2> /dev/null && [ "$HAS_CSRT" = "yes" ]; then
     CV_VERSION=$($PYTHON_CMD -c "import cv2; print(cv2.__version__)")
-    echo -e "  ${GREEN}✓${NC} OpenCV already installed: $CV_VERSION"
+    echo -e "  ${GREEN}✓${NC} OpenCV already installed with tracking support: $CV_VERSION"
 else
-    echo -e "  ${YELLOW}Installing OpenCV (opencv-python)...${NC}"
-    $PYTHON_CMD -m pip install --user opencv-python-headless numpy
-    echo -e "  ${GREEN}✓${NC} OpenCV installed!"
+    if $PYTHON_CMD -c "import cv2" 2> /dev/null; then
+        echo -e "  ${YELLOW}OpenCV found but missing CSRT tracker support.${NC}"
+        echo -e "  ${YELLOW}Replacing with opencv-contrib-python...${NC}"
+        $PYTHON_CMD -m pip uninstall -y opencv-python opencv-python-headless opencv-contrib-python-headless 2>/dev/null || true
+    else
+        echo -e "  ${YELLOW}Installing OpenCV (opencv-contrib-python)...${NC}"
+    fi
+    $PYTHON_CMD -m pip install --user opencv-contrib-python numpy
+    echo -e "  ${GREEN}✓${NC} OpenCV (with tracking support) installed!"
 fi
 
 # Check numpy
