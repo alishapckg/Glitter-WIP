@@ -19,7 +19,7 @@ Python dependenciespip install opencv-python numpy
 For audio supportbrew install ffmpeg
 
 Quick Install
-git clone https://github.com/YOURUSER/y2k-zones.git
+git clone https://github.com/alishapckg/Glitter.git
 cd y2k-zones
 chmod +x bin/y2k-zones install.sh
 ./install.sh
