@@ -18,17 +18,45 @@ video through a zone-based, click-and-paint interface.
   vintage feel.
 - **Global color filter** - a full-video color wash (pink, lilac, emerald,
   baby blue, warm gold, or a custom color) with adjustable intensity.
-- **Track motion** - available on the blur, glitter, and glass zones. When
-  enabled, a CSRT object tracker (`cv2.TrackerCSRT`) locks onto the bounding
-  box of your painted zone and follows it frame-to-frame, in any direction,
-  for any kind of subject (person, animal, object) - it tracks by visual
-  appearance, not by recognizing "this is a person". The painted mask shape
-  is translated/rescaled to match wherever the tracked box moves. If the
-  tracker loses its target (heavy occlusion, very fast motion, hard scene
-  cut), the zone freezes at its last known position and a warning is
-  printed - it won't snap somewhere wrong or crash the render. Leave it off
-  (default) for a fully static mask painted once on the first frame.
 - Original audio is preserved in the output.
+
+## Download
+
+**Option A - with git:**
+
+```bash
+cd ~/Desktop
+git clone https://github.com/alishapckg/Glitter-WIP.git
+cd Glitter-WIP
+```
+
+**Option B - without git:**
+
+1. On the repository's GitHub page, click the green **Code** button →
+   **Download ZIP**.
+2. Unzip it (double-click the downloaded file).
+3. In Terminal, `cd` into the unzipped folder:
+   ```bash
+   cd ~/Downloads/Glitter-WIP-main
+   ```
+
+Then run the installer:
+
+```bash
+chmod +x install.sh
+./install.sh
+```
+
+This installs the Python dependencies (`opencv-contrib-python`, `numpy`),
+`ffmpeg`, and registers the `y2k-zones` command on your system. Verify it
+worked with:
+
+```bash
+which y2k-zones
+```
+
+To get updates later, pull the latest changes (or download the ZIP again)
+and re-run `./install.sh`.
 
 ## Requirements
 
@@ -42,11 +70,6 @@ Install the Python dependencies:
 ```bash
 pip3 install opencv-contrib-python numpy
 ```
-
-Note: "Track motion" needs the CSRT tracker, which lives in OpenCV's contrib
-modules - plain `opencv-python` does not include it. If CSRT isn't
-available at runtime, the script won't crash: any zone with "Track motion"
-on will just print a warning and fall back to a static mask.
 
 Install ffmpeg (if you don't already have it):
 
